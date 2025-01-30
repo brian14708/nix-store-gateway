@@ -10,7 +10,6 @@ use crate::sign::AwsSigner;
 
 #[derive(Deserialize)]
 pub struct Config {
-    pub listen: String,
     mirrors: Vec<Mirror>,
     origins: Vec<Origin>,
     s3: S3,

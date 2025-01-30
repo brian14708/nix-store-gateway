@@ -27,13 +27,17 @@ type AppState = Arc<App>;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    if std::env::args().len() != 2 {
-        eprintln!("Usage: {} <config.toml>", std::env::args().next().unwrap());
+    if std::env::args().len() != 3 {
+        eprintln!(
+            "Usage: {} <listen> <config.toml>",
+            std::env::args().next().unwrap()
+        );
         std::process::exit(1);
     }
 
-    let config = Config::load(std::env::args().nth(1).unwrap())?;
-    let listener = TcpListener::bind(&config.listen).await?;
+    let addr = std::env::args().nth(1).unwrap();
+    let config = Config::load(std::env::args().nth(2).unwrap())?;
+    let listener = TcpListener::bind(&addr).await?;
 
     let state = App::from_config(config)?;
     let app = Router::new()

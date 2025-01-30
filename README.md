@@ -11,14 +11,12 @@ A simple gateway service that manages multiple layers of Nix binary cache backen
 To start the service:
 
 ```sh
-./nix-store-gateway config.toml
+./nix-store-gateway 127.0.0.1:3000 config.toml
 ```
 
 Example `config.toml`:
 
 ```toml
-listen = "127.0.0.1:3000"
-
 [[mirrors]]
 url = "https://mirror.sjtu.edu.cn/nix-channels/store/"
 
