@@ -1,5 +1,6 @@
-use std::{future::Future, path::Path, pin::Pin, time::Duration};
+use std::{future::Future, path::Path, time::Duration};
 
+use anyhow::anyhow;
 use bytes::Bytes;
 use futures::Stream;
 use reqwest::{redirect::Policy, Client, Url};
@@ -7,24 +8,25 @@ use serde::Deserialize;
 
 use crate::sign::AwsSigner;
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 pub struct Config {
+    pub listen: String,
     mirrors: Vec<Mirror>,
     origins: Vec<Origin>,
     s3: S3,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 struct Mirror {
     url: Url,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 struct Origin {
     url: Url,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 struct S3 {
     endpoint: Url,
     bucket: String,
@@ -34,10 +36,18 @@ struct S3 {
 }
 
 impl Config {
-    pub fn load(config: impl AsRef<Path>) -> Self {
-        let config = std::fs::read_to_string(config).unwrap();
-        toml::from_str(&config).unwrap()
+    pub fn load(config: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let config = std::fs::read_to_string(config)?;
+        Ok(toml::from_str(&config)?)
     }
+}
+
+#[derive(Clone)]
+enum CacheItem {
+    Mirror(String),
+    Origin(String),
+    NotExistMirror,
+    NotExistOrigin,
 }
 
 pub struct App {
@@ -46,12 +56,14 @@ pub struct App {
     origins: Vec<Origin>,
     aws_endpoint: Url,
     aws_signer: AwsSigner,
-    cache: moka::future::Cache<String, Option<String>>,
+    cache: moka::future::Cache<String, CacheItem>,
 }
 
 impl App {
-    pub fn from_config(config: Config) -> Self {
-        let client = Client::builder().redirect(Policy::none()).build().unwrap();
+    const TTL: Duration = Duration::from_secs(5 * 60);
+
+    pub fn from_config(config: Config) -> anyhow::Result<Self> {
+        let client = Client::builder().redirect(Policy::none()).build()?;
 
         let aws_signer = AwsSigner::new(
             config.s3.access_key_id,
@@ -61,121 +73,138 @@ impl App {
         );
 
         let aws_endpoint = {
-            let scheme = config.s3.endpoint.scheme();
-            let host = config.s3.endpoint.host_str().unwrap();
-            let full_url = format!("{}://{}.{}", scheme, config.s3.bucket, host);
-            full_url.parse::<Url>().unwrap()
+            let mut u = config.s3.endpoint.clone();
+            u.set_host(Some(&format!(
+                "{}.{}",
+                config.s3.bucket,
+                u.host_str().ok_or_else(|| anyhow!("missing s3 host"))?
+            )))?;
+            u
         };
 
         let cache = moka::future::Cache::builder()
-            .time_to_live(Duration::from_secs(60))
+            .time_to_live(Self::TTL)
             .build();
 
-        Self {
+        Ok(Self {
             client,
             mirrors: config.mirrors,
             origins: config.origins,
             aws_signer,
             aws_endpoint,
             cache,
-        }
+        })
     }
 
     pub async fn get_mirror(&self, path: &str) -> Option<String> {
-        if let Some(s) = self.cache.get(path).await {
-            return s;
+        match self.cache.get(path).await {
+            Some(CacheItem::Mirror(s)) => return Some(s),
+            Some(CacheItem::Origin(_) | CacheItem::NotExistOrigin | CacheItem::NotExistMirror) => {
+                return None
+            }
+            None => {}
         }
 
-        let mut tasks = Vec::<Pin<Box<dyn Future<Output = Result<String, ()>> + Send>>>::new();
-        for mirror in &self.mirrors {
-            let url = mirror.url.join(path.trim_start_matches('/')).unwrap();
-            let req = self.client.get(url.clone()).build().unwrap();
-            tasks.push(Box::pin(async move {
+        let tasks = self
+            .mirrors
+            .iter()
+            .map(|mirror| {
+                let url = mirror.url.join(path.trim_start_matches('/')).unwrap();
+                let req = self.client.get(url.clone()).build().unwrap();
+                (req, url)
+            })
+            .chain(Some({
+                let url = self
+                    .aws_endpoint
+                    .join(path.trim_start_matches('/'))
+                    .unwrap();
+                let sign = self
+                    .aws_signer
+                    .sign(self.client.head(url.clone()).build().unwrap());
+                let geturl = self.aws_signer.sign_url(url, Self::TTL * 5);
+                (sign, geturl)
+            }))
+            .rev()
+            .map(|(req, url)| {
+                Box::pin(async move {
+                    if let Ok(resp) = self.client.execute(req).await {
+                        let status = resp.status().as_u16();
+                        if (200..300).contains(&status) {
+                            return Ok(url.to_string());
+                        }
+                    }
+                    Err(())
+                })
+            });
+
+        let v = futures::future::select_ok(tasks).await;
+        if let Ok((url, _)) = v {
+            self.cache
+                .insert(path.to_string(), CacheItem::Mirror(url.clone()))
+                .await;
+            Some(url)
+        } else {
+            self.cache
+                .insert(path.to_string(), CacheItem::NotExistMirror)
+                .await;
+            None
+        }
+    }
+
+    pub async fn get_origin(&self, path: &str) -> Option<(String, reqwest::Response)> {
+        match self.cache.get(path).await {
+            Some(CacheItem::Mirror(u) | CacheItem::Origin(u)) => {
+                let req = self.client.get(u.clone()).build().unwrap();
                 if let Ok(resp) = self.client.execute(req).await {
                     let status = resp.status().as_u16();
                     if (200..300).contains(&status) {
-                        Ok(url.to_string())
-                    } else {
-                        Err(())
+                        return Some((u, resp));
                     }
-                } else {
-                    Err(())
                 }
-            }));
-        }
-        let url = self
-            .aws_endpoint
-            .join(path.trim_start_matches('/'))
-            .unwrap();
-        let sign = self
-            .aws_signer
-            .sign(self.client.head(url.clone()).build().unwrap());
-        tasks.push(Box::pin(async move {
-            if let Ok(resp) = self.client.execute(sign).await {
-                let status = resp.status().as_u16();
-                if (200..300).contains(&status) {
-                    let sign = self.aws_signer.sign_url(url, Duration::from_secs(600));
-                    Ok(sign.to_string())
-                } else {
-                    Err(())
-                }
-            } else {
-                Err(())
             }
-        }));
-
-        let v = futures::future::select_ok(tasks.into_iter()).await;
-        if let Ok((url, _)) = v {
-            self.cache.insert(path.to_string(), Some(url.clone())).await;
-            return Some(url);
-        } else {
-            self.cache.insert(path.to_string(), None).await;
+            Some(CacheItem::NotExistOrigin) => {
+                return None;
+            }
+            Some(CacheItem::NotExistMirror) | None => {}
         }
-        None
-    }
 
-    pub async fn get_origin(&self, path: &str) -> Option<reqwest::Response> {
-        let mut tasks =
-            Vec::<Pin<Box<dyn Future<Output = Result<reqwest::Response, ()>> + Send>>>::new();
-        for origin in &self.origins {
-            let url = origin.url.join(path.trim_start_matches('/')).unwrap();
-            println!("{:?}", url);
-            tasks.push(Box::pin(async move {
-                let mut url = url;
+        let tasks = self.origins.iter().map(|origin| {
+            Box::pin(async move {
+                let mut url = origin.url.join(path.trim_start_matches('/')).unwrap();
                 loop {
-                    let req = self.client.get(url).build().unwrap();
+                    let req = self.client.get(url.clone()).build().unwrap();
                     if let Ok(resp) = self.client.execute(req).await {
-                        let status = resp.status().as_u16();
-                        if let (true, Some(location)) =
-                            ((300..400).contains(&status), resp.headers().get("location"))
-                        {
-                            url = location.to_str().unwrap().parse().unwrap();
-                            continue;
-                        } else if (200..300).contains(&status) {
-                            return Ok(resp);
-                        } else {
-                            return Err(());
-                        }
+                        match (resp.status().as_u16(), resp.headers().get("location")) {
+                            (200..=299, _) => return Ok((url.to_string(), resp)),
+                            (300..=399, Some(location)) => {
+                                url = location.to_str().unwrap().parse().unwrap();
+                            }
+                            _ => return Err(()),
+                        };
                     }
-                    break;
                 }
-                Err(())
-            }));
-        }
-        let v = futures::future::select_ok(tasks.into_iter()).await;
-        if let Ok((resp, _)) = v {
-            Some(resp)
+            })
+        });
+        let v = futures::future::select_ok(tasks).await;
+        if let Ok(((url, resp), _)) = v {
+            self.cache
+                .insert(path.to_string(), CacheItem::Origin(url.clone()))
+                .await;
+            Some((url, resp))
         } else {
+            self.cache
+                .insert(path.to_string(), CacheItem::NotExistOrigin)
+                .await;
             None
         }
     }
 
     pub fn upload<E>(
         &self,
-        path: String,
-        size: Option<usize>,
+        path: &str,
+        size: Option<u64>,
         data: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
-    ) -> impl Future<Output = reqwest::Result<()>>
+    ) -> impl Future<Output = anyhow::Result<()>>
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
     {
@@ -193,17 +222,24 @@ impl App {
         let sign = self.aws_signer.sign(req.build().unwrap());
         let client = self.client.clone();
         let cache = self.cache.clone();
-        let geturl = self.aws_signer.sign_url(url, Duration::from_secs(600));
+        let geturl = self.aws_signer.sign_url(url, Self::TTL * 5);
         let p = path.to_string();
         async move {
-            cache.remove(&p).await;
-            let resp = client.execute(sign).await?;
-            if resp.error_for_status().is_ok() {
-                cache.insert(p, Some(geturl.to_string())).await;
-            } else {
-                cache.insert(p, None).await;
-            }
+            let _ = client.execute(sign).await?.error_for_status()?;
+            cache.insert(p, CacheItem::Mirror(geturl.to_string())).await;
             Ok(())
         }
+    }
+
+    pub async fn delete(&self, path: &str) -> anyhow::Result<()> {
+        let url = self
+            .aws_endpoint
+            .join(path.trim_start_matches('/'))
+            .unwrap();
+        let req = self.client.delete(url.clone());
+        let sign = self.aws_signer.sign(req.build().unwrap());
+        let _ = self.client.execute(sign).await?.error_for_status()?;
+        self.cache.remove(path).await;
+        Ok(())
     }
 }

@@ -56,10 +56,15 @@ fn hmac(key: impl AsRef<[u8]>, data: &str) -> impl AsRef<[u8]> {
 }
 
 impl AwsSigner {
-    pub fn new(access_key: String, access_secret: String, region: String, service: String) -> Self {
+    pub fn new(
+        access_key: String,
+        access_secret: impl AsRef<str>,
+        region: String,
+        service: String,
+    ) -> Self {
         AwsSigner {
             access_key,
-            access_secret: format!("AWS4{}", access_secret),
+            access_secret: format!("AWS4{}", access_secret.as_ref()),
             region,
             service,
         }
@@ -80,13 +85,11 @@ impl AwsSigner {
         let payload: Cow<'static, str> = req.body().map_or(
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into(),
             |b| {
-                b.as_bytes()
-                    .map(|s| {
-                        let mut hasher = Sha256::new();
-                        hasher.update(s);
-                        hex::encode(hasher.finalize()).into()
-                    })
-                    .unwrap_or("UNSIGNED-PAYLOAD".into())
+                b.as_bytes().map_or("UNSIGNED-PAYLOAD".into(), |s| {
+                    let mut hasher = Sha256::new();
+                    hasher.update(s);
+                    hex::encode(hasher.finalize()).into()
+                })
             },
         );
 
@@ -100,7 +103,7 @@ impl AwsSigner {
                 if let Some(host) = url.host_str() {
                     let port = url.port();
                     let host_header = match port {
-                        Some(p) => format!("{}:{}", host, p),
+                        Some(p) => format!("{host}:{p}"),
                         None => host.to_string(),
                     };
                     req.headers_mut()
@@ -135,7 +138,7 @@ impl AwsSigner {
         let signed_headers = header_map.keys().join(";");
         let canonical_headers = header_map
             .into_iter()
-            .map(|(k, v)| format!("{}:{}", k, v))
+            .map(|(k, v)| format!("{k}:{v}"))
             .join("\n");
 
         let canonical_request = format!(
@@ -179,7 +182,7 @@ impl AwsSigner {
         let host = if let Some(host) = url.host_str() {
             let port = url.port();
             match port {
-                Some(p) => format!("{}:{}", host, p),
+                Some(p) => format!("{host}:{p}"),
                 None => host.to_string(),
             }
         } else {
@@ -191,7 +194,7 @@ impl AwsSigner {
         let signed_headers = header_map.iter().map(|(k, _)| k).join(";");
         let canonical_headers = header_map
             .into_iter()
-            .map(|(k, v)| format!("{}:{}", k, v))
+            .map(|(k, v)| format!("{k}:{v}"))
             .join("\n");
 
         {

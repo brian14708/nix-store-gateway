@@ -37,11 +37,10 @@
         }:
         let
           craneLib = (crane.mkLib pkgs).overrideToolchain inputs'.fenix.packages.stable.toolchain;
-          pname = "hello";
+          pname = "nix-store-gateway";
         in
         {
-          devShells.default = craneLib.devShell {
-          };
+          devShells.default = craneLib.devShell { };
 
           treefmt = {
             projectRootFile = "flake.nix";
@@ -73,14 +72,6 @@
                   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
                 }
               );
-            docker = pkgs.dockerTools.buildImage {
-              name = pname;
-              tag = "latest";
-              copyToRoot = [ self'.packages.default ];
-              config = {
-                Cmd = [ "/bin/${pname}" ];
-              };
-            };
           };
           checks = {
           } // (pkgs.lib.mapAttrs' (n: pkgs.lib.nameValuePair "package-${n}") self'.packages);
