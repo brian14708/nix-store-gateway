@@ -1,6 +1,6 @@
 #![warn(clippy::pedantic)]
 
-use std::sync::Arc;
+use std::{future::ready, sync::Arc, time::Duration};
 
 use axum::{
     extract::{Request, State},
@@ -10,9 +10,12 @@ use axum::{
     Router,
 };
 use bytes::Bytes;
-use tokio::{net::TcpListener, sync::mpsc};
+use metrics::counter;
+use metrics_exporter_prometheus::PrometheusBuilder;
+use tokio::{net::TcpListener, sync::mpsc, time::interval};
 use tokio_stream::StreamExt;
 use tower_http::trace::TraceLayer;
+use url::Url;
 
 mod app;
 mod error;
@@ -39,18 +42,28 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::load(std::env::args().nth(2).unwrap())?;
     let listener = TcpListener::bind(&addr).await?;
 
+    let prometheus = PrometheusBuilder::new().install_recorder().unwrap();
+    let m = prometheus.clone();
+    tokio::spawn(async move {
+        let mut interval = interval(Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            m.run_upkeep();
+        }
+    });
+
     let state = App::from_config(config)?;
     let app = Router::new()
-        .route("/nix-cache-info", get(info))
+        .route("/metrics", get(move || ready(prometheus.render())))
+        .route(
+            "/nix-cache-info",
+            get(|| ready("StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\n")),
+        )
         .route("/{*key}", get(fetch).head(check).put(upload).delete(delete))
         .with_state(AppState::new(state))
         .layer(TraceLayer::new_for_http());
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-async fn info() -> &'static str {
-    "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\n"
 }
 
 async fn check(State(app): State<AppState>, request: Request) -> Response {
@@ -78,11 +91,39 @@ async fn check(State(app): State<AppState>, request: Request) -> Response {
 async fn fetch(State(app): State<AppState>, request: Request) -> Response {
     let u = app.get_mirror(request.uri().path()).await;
     if let Some(url) = u {
+        if let Some(host) = Url::parse(&url)
+            .ok()
+            .as_ref()
+            .and_then(|u| u.host_str())
+            .map(str::to_string)
+        {
+            counter!(
+                "nix_store_gateway_fetch",
+                "type" => "mirror",
+                "host" => host,
+            )
+            .increment(1);
+        }
+
         return Redirect::temporary(&url).into_response();
     }
 
     let o = app.get_origin(request.uri().path()).await;
-    if let Some((_, resp)) = o {
+    if let Some((u, resp)) = o {
+        if let Some(host) = Url::parse(&u)
+            .ok()
+            .as_ref()
+            .and_then(|u| u.host_str())
+            .map(str::to_string)
+        {
+            counter!(
+                "nix_store_gateway_fetch",
+                "type" => "origin",
+                "host" => host,
+            )
+            .increment(1);
+        }
+
         let headers = resp.headers().clone();
         let size = headers
             .get("content-length")
@@ -124,6 +165,7 @@ async fn fetch(State(app): State<AppState>, request: Request) -> Response {
         return r;
     }
 
+    counter!("nix_store_gateway_fetch", "type" => "not_found").increment(1);
     StatusCode::NOT_FOUND.into_response()
 }
 

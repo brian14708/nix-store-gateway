@@ -12,6 +12,8 @@ futures = "0.3.31"
 hex = "0.4.3"
 hmac = "0.12.1"
 itertools = "0.14.0"
+metrics = "0.24.1"
+metrics-exporter-prometheus = { version = "0.16.2", default-features = false }
 moka = { version = "0.12.10", features = ["future"] }
 percent-encoding = "2.3.1"
 reqwest = { version = "0.12.12", default-features = false, features = ["http2", "rustls-tls", "stream"] }
