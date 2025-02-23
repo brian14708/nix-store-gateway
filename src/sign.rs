@@ -1,5 +1,5 @@
 use chrono::Utc;
-use hmac::{digest::FixedOutput, Hmac, Mac};
+use hmac::{Hmac, Mac, digest::FixedOutput};
 use itertools::Itertools;
 use percent_encoding::AsciiSet;
 use reqwest::{Request, Url};
@@ -48,11 +48,11 @@ fn percent_encode(input: &str) -> Cow<str> {
     percent_encoding::percent_encode(input.as_bytes(), SET).into()
 }
 
-fn hmac(key: impl AsRef<[u8]>, data: &str) -> impl AsRef<[u8]> {
+fn hmac(key: impl AsRef<[u8]>, data: &str) -> [u8; 32] {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(key.as_ref()).expect("HMAC can take key of any size");
     mac.update(data.as_bytes());
-    mac.finalize_fixed()
+    mac.finalize_fixed().into()
 }
 
 impl AwsSigner {
@@ -70,7 +70,7 @@ impl AwsSigner {
         }
     }
 
-    fn generate_signing_key(&self, date: &str) -> impl AsRef<[u8]> + '_ {
+    fn generate_signing_key(&self, date: &str) -> [u8; 32] {
         let tag = hmac(&self.access_secret, date);
         let tag = hmac(tag, &self.region);
         let tag = hmac(tag, &self.service);

@@ -3,11 +3,11 @@
 use std::{future::ready, sync::Arc, time::Duration};
 
 use axum::{
+    Router,
     extract::{Request, State},
     http::status::StatusCode,
     response::{IntoResponse, Redirect, Response},
     routing::get,
-    Router,
 };
 use bytes::Bytes;
 use metrics::counter;
