@@ -3,7 +3,7 @@ use std::{future::Future, path::Path, time::Duration};
 use anyhow::anyhow;
 use bytes::Bytes;
 use futures::Stream;
-use reqwest::{redirect::Policy, Client, Url};
+use reqwest::{Client, Url, redirect::Policy};
 use serde::Deserialize;
 
 use crate::sign::AwsSigner;
@@ -99,7 +99,7 @@ impl App {
         match self.cache.get(path).await {
             Some(CacheItem::Mirror(s)) => return Some(s),
             Some(CacheItem::Origin(_) | CacheItem::NotExistOrigin | CacheItem::NotExistMirror) => {
-                return None
+                return None;
             }
             None => {}
         }
@@ -198,14 +198,15 @@ impl App {
         }
     }
 
-    pub fn upload<E>(
+    pub fn upload<E, T>(
         &self,
         path: &str,
         size: Option<u64>,
-        data: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
-    ) -> impl Future<Output = anyhow::Result<()>>
+        data: T,
+    ) -> impl Future<Output = anyhow::Result<()>> + use<E, T>
     where
         E: Into<Box<dyn std::error::Error + Send + Sync>>,
+        T: Stream<Item = Result<Bytes, E>> + Send + 'static,
     {
         let url = self
             .aws_endpoint
