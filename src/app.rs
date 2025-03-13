@@ -136,8 +136,12 @@ impl App {
                 })
             });
 
-        let v = futures::future::select_ok(tasks).await;
-        if let Ok((url, _)) = v {
+        let t = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            futures::future::select_ok(tasks),
+        );
+        let v = t.await;
+        if let Ok(Ok((url, _))) = v {
             self.cache
                 .insert(path.to_string(), CacheItem::Mirror(url.clone()))
                 .await;
