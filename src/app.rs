@@ -183,7 +183,7 @@ impl App {
                                 url = location.to_str().unwrap().parse().unwrap();
                             }
                             _ => return Err(()),
-                        };
+                        }
                     }
                 }
             })
