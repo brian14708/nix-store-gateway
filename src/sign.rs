@@ -44,7 +44,7 @@ pub const SET: &AsciiSet = &percent_encoding::CONTROLS
     .add(b'`')
     .add(b'\\');
 
-fn percent_encode(input: &str) -> Cow<str> {
+fn percent_encode(input: &str) -> Cow<'_, str> {
     percent_encoding::percent_encode(input.as_bytes(), SET).into()
 }
 
